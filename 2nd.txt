@@ -1,0 +1,78 @@
+#!/bin/bash
+
+# Variables
+ACCESS_TOKEN="<your_access_token>"  # Replace with your GitLab personal access token
+GROUP_ID="<group_id>"              # Replace with your GitLab group ID or path
+BASE_URL="https://gitlab.com/api/v4"
+
+# Get Jira ticket number as input from the user
+read -p "Enter the Jira ticket number to search (e.g., ABC-123): " JIRA_TICKET
+
+if [[ -z "$JIRA_TICKET" ]]; then
+  echo "Error: Jira ticket number cannot be empty."
+  exit 1
+fi
+
+# Fetch all projects under the group
+echo "Fetching all projects under group ID: $GROUP_ID..."
+PROJECT_IDS=$(curl -s --header "PRIVATE-TOKEN: $ACCESS_TOKEN" "$BASE_URL/groups/$GROUP_ID/projects?per_page=100" | jq '.[].id')
+
+# Check if projects exist
+if [[ -z "$PROJECT_IDS" ]]; then
+  echo "Error: No projects found under the specified group."
+  exit 1
+fi
+
+# Initialize a variable to track projects with the Jira ticket
+MATCHING_PROJECTS=()
+
+# Iterate over each project
+for PROJECT_ID in $PROJECT_IDS; do
+  # Remove quotes from project ID
+  PROJECT_ID=$(echo "$PROJECT_ID" | tr -d '"')
+
+  # Fetch commits for the project
+  echo "Checking commits in Project ID: $PROJECT_ID..."
+  PAGE=1
+  while true; do
+    COMMITS=$(curl -s --header "PRIVATE-TOKEN: $ACCESS_TOKEN" "$BASE_URL/projects/$PROJECT_ID/repository/commits?per_page=100&page=$PAGE")
+
+    # Break if no more commits
+    if [[ $(echo "$COMMITS" | jq length) -eq 0 ]]; then
+      break
+    fi
+
+    # Search for the Jira ticket in commit messages
+    echo "$COMMITS" | jq -c '.[]' | while read -r COMMIT; do
+      MESSAGE=$(echo "$COMMIT" | jq -r '.message')
+      SHA=$(echo "$COMMIT" | jq -r '.id')
+
+      if echo "$MESSAGE" | grep -q "$JIRA_TICKET"; then
+        echo "  Found Jira ticket $JIRA_TICKET in commit: $SHA"
+        MATCHING_PROJECTS+=("$PROJECT_ID")
+
+        # Fetch tags for the commit
+        TAGS=$(curl -s --header "PRIVATE-TOKEN: $ACCESS_TOKEN" "$BASE_URL/projects/$PROJECT_ID/repository/tags")
+        TAG=$(echo "$TAGS" | jq -r --arg SHA "$SHA" '.[] | select(.commit.id == $SHA) | .name')
+
+        if [[ -n "$TAG" ]]; then
+          echo "    Tag associated with commit: $TAG"
+        else
+          echo "    No tag found for this commit."
+        fi
+      fi
+    done
+
+    PAGE=$((PAGE + 1))
+  done
+done
+
+# Display results
+if [[ ${#MATCHING_PROJECTS[@]} -eq 0 ]]; then
+  echo "No projects found with Jira ticket $JIRA_TICKET."
+else
+  echo "Projects with Jira ticket $JIRA_TICKET:"
+  for PROJECT in "${MATCHING_PROJECTS[@]}"; do
+    echo "  Project ID: $PROJECT"
+  done
+fi
